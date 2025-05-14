@@ -1,21 +1,29 @@
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.zip.DataFormatException;
+import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
 public class Main {
   public static void main(String[] args) {
 
     final String command = args[0];
-
-    switch (command) {
-      case "init" -> init();
-      case "cat-file" -> catFile(args);
-      default -> System.out.println("Unknown command: " + command);
+    try {
+      switch (command) {
+        case "init" -> init();
+        case "cat-file" -> catFile(args);
+        case "hash-object" -> hashObject(args);
+        default -> System.out.println("Unknown command: " + command);
+      }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
     }
   }
 
@@ -34,15 +42,49 @@ public class Main {
     }
   }
 
-  public static void catFile(String[] args) {
+  public static void catFile(String[] args) throws IOException {
     Path filepath = Paths.get(String.format("%s/.git/objects/%s/%s", System.getProperty("user.dir"),
         args[2].substring(0, 2), args[2].substring(2)));
+    byte[] compressedData = Files.readAllBytes(filepath);
     try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
-      byte[] compressedData = Files.readAllBytes(filepath);
       decompress(compressedData, os);
       String text = bytesToString(os.toByteArray());
       System.out.print(text.substring(text.indexOf('\0') + 1));
-    } catch (IOException e) {
+    }
+  }
+
+  public static void hashObject(String[] args) throws IOException {
+    String filename = args[1].equalsIgnoreCase("-w") ? args[2] : args[1];
+    StringBuilder body = new StringBuilder();
+    try (BufferedReader reader = Files.newBufferedReader(Paths.get(filename))) {
+      int letter;
+      while ((letter = reader.read()) != -1) {
+        body.append((char) letter);
+      }
+    }
+    String message = String.format("blob %d\0%s", body.length(), body.toString());
+    String messageSHA = getBlobHash(message);
+    if (args[1].equalsIgnoreCase("-w")) {
+      new File(
+          String.format("%s/.git/objects/%s", System.getProperty("user.dir"), messageSHA.substring(0, 2)))
+          .mkdir();
+      try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+        compress(stringToBytes(message), os);
+        Files.write(
+            Paths.get(String.format("%s/.git/objects/%s/%s", System.getProperty("user.dir"), messageSHA.substring(0, 2),
+                messageSHA.substring(2))),
+            os.toByteArray());
+      }
+    }
+    System.out.println(messageSHA);
+  }
+
+  public static String getBlobHash(String message) {
+    try {
+      MessageDigest md = MessageDigest.getInstance("SHA-1");
+      md.update(stringToBytes(message));
+      return bytesToHex(md.digest());
+    } catch (NoSuchAlgorithmException e) {
       throw new RuntimeException(e);
     }
   }
@@ -53,6 +95,34 @@ public class Main {
       result.append((char) b);
     }
     return result.toString();
+  }
+
+  public static String bytesToHex(byte[] bytes) {
+    StringBuilder result = new StringBuilder();
+    for (byte b : bytes) {
+      result.append(String.format("%02x", b));
+    }
+    return result.toString();
+  }
+
+  public static byte[] stringToBytes(String message) {
+    byte[] result = new byte[message.length()];
+    for (int i = 0; i < message.length(); i++) {
+      result[i] = (byte) message.charAt(i);
+    }
+    return result;
+  }
+
+  public static void compress(byte[] file, ByteArrayOutputStream os) {
+    Deflater compresser = new Deflater();
+    compresser.setInput(file);
+    compresser.finish();
+    byte[] buffer = new byte[1024];
+    while (!compresser.finished()) {
+      int count = compresser.deflate(buffer);
+      os.write(buffer, 0, count);
+    }
+    compresser.end();
   }
 
   public static void decompress(byte[] file, ByteArrayOutputStream os) {
