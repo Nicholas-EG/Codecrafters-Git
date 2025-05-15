@@ -24,6 +24,7 @@ public class Main {
         case "hash-object" -> hashObject(args);
         case "ls-tree" -> lsTree(args);
         case "write-tree" -> writeTree(args);
+        case "commit-tree" -> commitTree(args);
         default -> System.out.println("Unknown command: " + command);
       }
     } catch (IOException e) {
@@ -91,13 +92,52 @@ public class Main {
   public static void writeTree(String[] args) throws IOException {
     String tree = createTree(System.getProperty("user.dir"));
     String treeSHA = getHash(tree);
-    new File(String.format(".git/objects/%s", treeSHA.substring(0, 2))).mkdir();
+    new File(String.format(".git/objects/%s", treeSHA.substring(0, 2)))
+        .mkdir();
     try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
       compress(stringToBytes(tree), os);
-      Files.write(Paths.get(String.format(".git/objects/%s/%s", treeSHA.substring(0, 2), treeSHA.substring(2))),
+      Files.write(
+          Paths.get(
+              String.format(".git/objects/%s/%s",
+                  treeSHA.substring(0, 2),
+                  treeSHA.substring(2))),
           os.toByteArray());
     }
     System.out.println(treeSHA);
+  }
+
+  /**
+   * tree {tree_sha}
+   * {parents}
+   * author {author_name} <{author_email}> {author_date_seconds}
+   * {author_date_timezone}
+   * committer {committer_name} <{committer_email}> {committer_date_seconds}
+   * {committer_date_timezone}
+   * 
+   * {commit message}
+   */
+  public static void commitTree(String[] args) throws IOException {
+    StringBuilder body = new StringBuilder();
+    body.append(String.format("tree %s\n", args[1]));
+    if (args[2].equals("-p")) {
+      body.append(String.format("parent %s", args[3]));
+    }
+    body.append(String.format("author Nicholas nickegonzales99@gmail.com %d\n", System.currentTimeMillis()));
+    body.append(String.format("committer Nicholas nickegonzales99@gmail.com %d\n\n", System.currentTimeMillis()));
+    body.append(args[args.length - 1]);
+    body.append("\n");
+    String result = String.format("commit %d\0%s", body.length(), body.toString());
+    String sha = getHash(result);
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      compress(stringToBytes(result), os);
+      new File(String.format(".git/objects/%s", sha.substring(0, 2)))
+          .mkdir();
+      Files.write(
+          Paths.get(
+              String.format(".git/objects/%s/%s", sha.substring(0, 2), sha.substring(2))),
+          os.toByteArray());
+    }
+    System.out.println(sha);
   }
 
   public static String createTree(String pathname) throws IOException {
@@ -110,10 +150,9 @@ public class Main {
     files.sort((a, b) -> a.compareTo(b));
     try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
       for (Path file : files) {
+        String name = file.getFileName().toString();
         String mode;
-        String name;
         byte[] hash;
-        name = file.getFileName().toString();
         if (file.endsWith(".git"))
           continue;
         else if (Files.isDirectory(file)) {
