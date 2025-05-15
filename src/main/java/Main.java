@@ -1,7 +1,7 @@
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -23,6 +23,7 @@ public class Main {
         case "cat-file" -> catFile(args);
         case "hash-object" -> hashObject(args);
         case "ls-tree" -> lsTree(args);
+        case "write-tree" -> writeTree(args);
         default -> System.out.println("Unknown command: " + command);
       }
     } catch (IOException e) {
@@ -58,15 +59,8 @@ public class Main {
 
   public static void hashObject(String[] args) throws IOException {
     String filename = args[1].equalsIgnoreCase("-w") ? args[2] : args[1];
-    StringBuilder body = new StringBuilder();
-    try (BufferedReader reader = Files.newBufferedReader(Paths.get(filename))) {
-      int letter;
-      while ((letter = reader.read()) != -1) {
-        body.append((char) letter);
-      }
-    }
-    String message = String.format("blob %d\0%s", body.length(), body.toString());
-    String messageSHA = getBlobHash(message);
+    String message = createBlob(Paths.get(filename));
+    String messageSHA = getHash(message);
     if (args[1].equalsIgnoreCase("-w")) {
       new File(
           String.format("%s/.git/objects/%s", System.getProperty("user.dir"), messageSHA.substring(0, 2)))
@@ -91,6 +85,64 @@ public class Main {
     try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
       decompress(file, os);
       formatTree(os.toByteArray(), nameOnly);
+    }
+  }
+
+  public static void writeTree(String[] args) throws IOException {
+    String tree = createTree(System.getProperty("user.dir"));
+    String treeSHA = getHash(tree);
+    new File(String.format(".git/objects/%s", treeSHA.substring(0, 2))).mkdir();
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      compress(stringToBytes(tree), os);
+      Files.write(Paths.get(String.format(".git/objects/%s/%s", treeSHA.substring(0, 2), treeSHA.substring(2))),
+          os.toByteArray());
+    }
+    System.out.println(treeSHA);
+  }
+
+  public static String createTree(String pathname) throws IOException {
+    ArrayList<Path> files = new ArrayList<>();
+    try (DirectoryStream<Path> stream = Files.newDirectoryStream(Paths.get(pathname))) {
+      for (Path entry : stream) {
+        files.add(entry);
+      }
+    }
+    files.sort((a, b) -> a.compareTo(b));
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      for (Path file : files) {
+        String mode;
+        String name;
+        byte[] hash;
+        name = file.getFileName().toString();
+        if (file.endsWith(".git"))
+          continue;
+        else if (Files.isDirectory(file)) {
+          mode = "40000";
+          hash = getHashAsBytes(createTree(file.toString()));
+        } else if (Files.isExecutable(file)) {
+          mode = "100755";
+          hash = getHashAsBytes(createBlob(file));
+        } else if (Files.isSymbolicLink(file)) {
+          mode = "120000";
+          hash = getHashAsBytes(createBlob(file));
+        } else {
+          mode = "100644";
+          hash = getHashAsBytes(createBlob(file));
+        }
+        os.write(stringToBytes(String.format("%s %s\0", mode, name)));
+        os.write(hash);
+      }
+      byte[] body = os.toByteArray();
+      return String.format("tree %d\0%s", body.length, bytesToString(body));
+    }
+  }
+
+  public static String createBlob(Path file) throws IOException {
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      byte[] text = Files.readAllBytes(file);
+      os.write(stringToBytes(String.format("blob %d\0", text.length)));
+      os.write(text);
+      return bytesToString(os.toByteArray());
     }
   }
 
@@ -130,11 +182,21 @@ public class Main {
     return arr.length;
   }
 
-  public static String getBlobHash(String message) {
+  public static String getHash(String message) {
     try {
       MessageDigest md = MessageDigest.getInstance("SHA-1");
       md.update(stringToBytes(message));
       return bytesToHex(md.digest());
+    } catch (NoSuchAlgorithmException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static byte[] getHashAsBytes(String message) {
+    try {
+      MessageDigest md = MessageDigest.getInstance("SHA-1");
+      md.update(stringToBytes(message));
+      return md.digest();
     } catch (NoSuchAlgorithmException e) {
       throw new RuntimeException(e);
     }
