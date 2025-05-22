@@ -1,6 +1,15 @@
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.math.BigInteger;
+import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,8 +34,34 @@ public class Main {
         case "ls-tree" -> lsTree(args);
         case "write-tree" -> writeTree(args);
         case "commit-tree" -> commitTree(args);
+        case "clone" -> clone(args);
+        case "test" -> test(args);
         default -> System.out.println("Unknown command: " + command);
       }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static void test(String[] args) {
+    byte[] compressedBytes = stringToBytes2(args[args.length - 1]);
+    byte[] output = new byte[233];
+    Inflater inflater = new Inflater();
+    inflater.setInput(compressedBytes);
+    try {
+      int count = inflater.inflate(output);
+      System.out.println("count " + count);
+    } catch (DataFormatException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static byte[] stringToBytes2(String message) {
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      for (int i = 0; i < message.length(); i += 2) {
+        os.write((byte) Integer.parseInt(message.substring(i, i + 2), 16));
+      }
+      return os.toByteArray();
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
@@ -106,16 +141,6 @@ public class Main {
     System.out.println(treeSHA);
   }
 
-  /**
-   * tree {tree_sha}
-   * {parents}
-   * author {author_name} <{author_email}> {author_date_seconds}
-   * {author_date_timezone}
-   * committer {committer_name} <{committer_email}> {committer_date_seconds}
-   * {committer_date_timezone}
-   * 
-   * {commit message}
-   */
   public static void commitTree(String[] args) throws IOException {
     StringBuilder body = new StringBuilder();
     body.append(String.format("tree %s\n", args[1]));
@@ -138,6 +163,184 @@ public class Main {
           os.toByteArray());
     }
     System.out.println(sha);
+  }
+
+  public static void clone(String[] args) throws IOException {
+
+    final int ARG_LENGTH = 3;
+    final int PACK_HEADER_LENGTH = 12;
+    final char FIRST_PACK_CHAR = 'P';
+    final int NIBBLE_LENGTH = 4;
+    final int TYPE_MASK = 0x07;
+    final int MSB_BIT_MASK = 0x80;
+
+    if (args.length != ARG_LENGTH) {
+      System.out.println("Expected usage clone <remote repo url> <local repo name>");
+      return;
+    }
+
+    String ref = getHeadRef(args[1]);
+    byte[] packFile = getPackFile(args[1], ref);
+    int i = indexOf(packFile, 0, (byte) FIRST_PACK_CHAR) + PACK_HEADER_LENGTH;
+    byte[] compressedBytes = Arrays.copyOfRange(packFile, i, packFile.length);
+
+    // Debugging info,
+    System.out.println("PACKAGE DATA");
+    System.out.println("packfile length: " + packFile.length);
+    System.out
+        .println("Number of Git objects: " + Integer.parseInt(bytesToHex(Arrays.copyOfRange(packFile, i - 4, i)), 16));
+    System.out.println(bytesToHex(Arrays.copyOfRange(packFile, i + 8065, i + 8065 + 160)));
+    System.out.println();
+    // End of debugging section
+
+    String localRepoName = args[2];
+    new File(localRepoName).mkdir();
+    new File(String.format("%s/.git", localRepoName)).mkdir();
+    new File(String.format("%s/.git/objects", localRepoName)).mkdir();
+
+    int offset = 0;
+    while (offset < compressedBytes.length) {
+      byte head = compressedBytes[offset++];
+      int type = (head >> NIBBLE_LENGTH) & TYPE_MASK;
+      System.out.println("Type: " + type);
+      BigInteger size = BigInteger.valueOf(head & 0x0F);
+      boolean firstByte = true;
+      while ((head & MSB_BIT_MASK) != 0) {
+        head = compressedBytes[offset++];
+        size = BigInteger.valueOf(head & 0x7F).shiftLeft(firstByte ? 4 : 7).or(size);
+        firstByte = false;
+      }
+      System.out.println("Object size: " + size.intValue());
+
+      int consumed = 0;
+      System.out.println("offset set to " + offset);
+      switch (type) {
+        case 1 -> consumed = processNonRefObject(compressedBytes, offset, size.intValue(), args[2]);
+        case 2 -> consumed = processNonRefObject(compressedBytes, offset, size.intValue(), args[2]);
+        case 3 -> consumed = processNonRefObject(compressedBytes, offset, size.intValue(), args[2]);
+        case 4 -> consumed = processNonRefObject(compressedBytes, offset, size.intValue(), args[2]);
+        // Type 5 object reserved by Git
+        // case 6 -> processOFSDelta(inflaterInput, args[2]);
+        // case 7 -> processRefDelta(compressedBytes, offset, args[2]);
+        default -> throw new RuntimeException("Not a supported Git type. Type " + type);
+      }
+
+      System.out.println("Bytes consumed: " + consumed);
+      offset += consumed;
+      System.out.println("offset set to " + offset);
+      System.out.println();
+    }
+  }
+
+  public static void processRefDelta(byte[] bytes, int offset, String repoName) throws IOException {
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      os.write(Arrays.copyOfRange(bytes, offset, offset + 20));
+
+    }
+  }
+
+  public static int processNonRefObject(byte[] compressedBytes, int offset, int uncompressedSize, String repoName)
+      throws IOException {
+    Inflater inflater = new Inflater();
+    inflater.setInput(compressedBytes, offset, compressedBytes.length - offset);
+    byte[] buffer = new byte[uncompressedSize];
+    try {
+      int bytesRead = 0;
+      while (bytesRead < uncompressedSize) {
+        int count = inflater.inflate(buffer, bytesRead, uncompressedSize - bytesRead);
+        System.out.println("Count: " + count + " | BytesRead: " + bytesRead);
+        if (count <= 0) {
+          System.out.println("delta: " + (uncompressedSize - (bytesRead + count)));
+          throw new RuntimeException("Not enough bytes in stream");
+        }
+        bytesRead += count;
+      }
+      writeToGitFolder(new String(buffer), repoName);
+      return (int) inflater.getBytesRead();
+    } catch (DataFormatException e) {
+      throw new RuntimeException("Failed to read at position " + offset + ".\n Reason given: " + e);
+    }
+  }
+
+  public static void writeToGitFolder(String message, String repoName) throws IOException {
+    String name = getHash(message);
+    new File(String.format("%s/.git/objects/%s",
+        repoName,
+        name.substring(0, 2)))
+        .mkdir();
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      compress(message.getBytes(), os);
+      Files.write(
+          Paths.get(
+              String.format("%s/.git/objects/%s/%s",
+                  repoName,
+                  name.substring(0, 2),
+                  name.substring(2))),
+          os.toByteArray());
+    }
+  }
+
+  public static String getHeadRef(String address) throws IOException {
+    try {
+      URL url = new URI(address + "/info/refs?service=git-upload-pack").toURL();
+      HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+      connection.setRequestMethod("GET");
+      try (InputStream is = connection.getInputStream();
+          ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+        int b;
+        while ((b = is.read()) != -1) {
+          os.write((byte) b);
+        }
+        byte[] buffer = os.toByteArray();
+        int i = indexOf(buffer, 0, (byte) '\n') + 9;
+        return bytesToString(Arrays.copyOfRange(buffer, i, i + 40));
+      }
+    } catch (URISyntaxException | MalformedURLException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static byte[] getPackFile(String address, String reference) throws IOException {
+    try {
+      URL url = new URI(address + "/git-upload-pack").toURL();
+      HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+      connection.setRequestMethod("POST");
+      connection.setDoOutput(true);
+      connection.setRequestProperty("Content-Type", "application/x-git-upload-pack-request");
+      connection.setRequestProperty("Accept", "application/x-git-upload-pack-result");
+      try (DataOutputStream out = new DataOutputStream(connection.getOutputStream())) {
+        out.write(getWantMessage(reference));
+        out.flush();
+      }
+      if (connection.getResponseCode() != 200)
+        throw new RuntimeException(
+            String.format("Connection failed, received response code: %d %s",
+                connection.getResponseCode(),
+                connection.getResponseMessage()));
+      try (InputStream is = connection.getInputStream();
+          ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+        int b;
+        while ((b = is.read()) != -1) {
+          os.write((byte) b);
+        }
+        return os.toByteArray();
+      }
+    } catch (URISyntaxException | MalformedURLException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  // TODO: make this dynamic
+  public static byte[] getWantMessage(String header) throws IOException {
+    try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+      String wantLine = "want " + header + " delete-refs side-band-64k quiet ofs-delta agent=java/0.1\n";
+      byte[] wantLineBytes = wantLine.getBytes(StandardCharsets.UTF_8);
+      os.write(String.format("%04x", wantLineBytes.length + 4).getBytes(StandardCharsets.UTF_8));
+      os.write(wantLineBytes);
+      os.write("0000".getBytes(StandardCharsets.UTF_8));
+      os.write("0009done\n".getBytes(StandardCharsets.UTF_8));
+      return os.toByteArray();
+    }
   }
 
   public static String createTree(String pathname) throws IOException {
